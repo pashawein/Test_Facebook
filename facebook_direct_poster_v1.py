@@ -26,10 +26,8 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-import pyperclip
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
@@ -81,6 +79,13 @@ POST_BUTTON_XPATH = (
 # --------------------------------------------------------------------------- #
 
 def setup_logging() -> Path:
+    # Windows terminals often default to a legacy ANSI codepage that can't
+    # render Cyrillic; force UTF-8 so log output isn't garbled into "?".
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
     REPORTS_DIR.mkdir(exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     log_path = REPORTS_DIR / f"report_{timestamp}.log"
@@ -259,10 +264,13 @@ def find_post_textbox(driver, wait: WebDriverWait):
 
 
 def type_post_text(driver, textbox, text: str) -> None:
+    # Typed natively via Selenium's key events rather than the OS clipboard.
+    # A clipboard round-trip (pyperclip + Ctrl+V) goes through Windows'
+    # legacy ANSI codepage on some machines and silently mangles Cyrillic
+    # into "?", even though the source text and log file are correct UTF-8.
     js_click(driver, textbox)
     time.sleep(0.5)
-    pyperclip.copy(text)
-    textbox.send_keys(Keys.CONTROL, "v")
+    textbox.send_keys(text)
     time.sleep(0.5)
 
 
