@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+posting_reports/*.log
+posting_reports/*.csv
