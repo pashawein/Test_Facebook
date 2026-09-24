@@ -70,21 +70,27 @@ WRITE_SOMETHING_XPATH = (
     "or contains(., 'Что у вас нового') or contains(., \"What's on your mind\")]"
 )
 
-ATTACH_MEDIA_XPATH = "//div[@aria-label='Attach a photo or video']"
+# A Facebook page typically has several hidden <input type="file"> elements
+# scattered around (cover photo, avatar, other widgets, etc.), not just the
+# composer's own. Everything below is scoped to the open "Create post"
+# dialog specifically, so we never grab the wrong one.
+DIALOG_XPATH = "//div[@role='dialog']"
+
+ATTACH_MEDIA_XPATH = ".//div[@aria-label='Attach a photo or video']"
 
 # Facebook shows one of these once the file has actually finished
 # uploading/processing and is attached to the composer. Waiting for this
 # (rather than a fixed sleep) avoids clicking "Post" before a video is
 # ready, which silently posts the text alone with no attachment.
 MEDIA_ATTACHED_XPATH = (
-    "//div[@aria-label='Remove photo' or @aria-label='Remove video' "
+    ".//div[@aria-label='Remove photo' or @aria-label='Remove video' "
     "or @aria-label='Удалить фото' or @aria-label='Удалить видео']"
-    " | //div[@role='dialog']//video"
-    " | //div[@role='dialog']//img[contains(@src, 'blob:')]"
+    " | .//video"
+    " | .//img[contains(@src, 'blob:')]"
 )
 
 POST_BUTTON_XPATH = (
-    "//div[@aria-label='Post' or @aria-label='Опубликовать']"
+    ".//div[@aria-label='Post' or @aria-label='Опубликовать']"
     "[@role='button']"
 )
 
@@ -245,35 +251,49 @@ def js_click(driver, element) -> None:
     driver.execute_script("arguments[0].click();", element)
 
 
-def open_composer(driver, wait: WebDriverWait) -> None:
+def open_composer(driver, wait: WebDriverWait):
     write_something = wait.until(
         EC.element_to_be_clickable((By.XPATH, WRITE_SOMETHING_XPATH))
     )
     js_click(driver, write_something)
 
+    # Scope everything that follows to this dialog element specifically --
+    # the page has other hidden <input type="file"> elements (cover photo,
+    # avatar, etc.) and a page-wide search can grab the wrong one.
+    return wait.until(EC.presence_of_element_located((By.XPATH, DIALOG_XPATH)))
 
-def attach_media(driver, wait: WebDriverWait, media_path: Path, is_video: bool) -> None:
-    attach_button = wait.until(
-        EC.element_to_be_clickable((By.XPATH, ATTACH_MEDIA_XPATH))
+
+def _pick_media_file_input(file_inputs):
+    for inp in file_inputs:
+        accept = (inp.get_attribute("accept") or "").lower()
+        if "video" in accept or "image" in accept:
+            return inp
+    return file_inputs[0]
+
+
+def attach_media(driver, dialog, media_path: Path, is_video: bool) -> None:
+    attach_button = WebDriverWait(driver, WAIT_TIMEOUT).until(
+        lambda _: dialog.find_element(By.XPATH, ATTACH_MEDIA_XPATH)
     )
     js_click(driver, attach_button)
 
-    file_input = wait.until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']"))
+    file_inputs = WebDriverWait(driver, WAIT_TIMEOUT).until(
+        lambda _: dialog.find_elements(By.CSS_SELECTOR, "input[type='file']") or False
     )
+    file_input = _pick_media_file_input(file_inputs)
     file_input.send_keys(str(media_path.resolve()))
 
     # This only confirms the upload *started* (a preview/thumbnail appeared),
     # not that it's fully processed -- see wait_for_post_button_ready for that.
     timeout = VIDEO_ATTACH_TIMEOUT if is_video else PHOTO_ATTACH_TIMEOUT
     WebDriverWait(driver, timeout).until(
-        EC.presence_of_element_located((By.XPATH, MEDIA_ATTACHED_XPATH))
+        lambda _: dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH) or False
     )
 
 
-def find_post_textbox(driver, wait: WebDriverWait):
-    def _locate(drv):
-        candidates = drv.find_elements(
+def find_post_textbox(dialog, wait: WebDriverWait):
+    def _locate(_):
+        candidates = dialog.find_elements(
             By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox']"
         )
         for el in candidates:
@@ -296,7 +316,7 @@ def type_post_text(driver, textbox, text: str) -> None:
     time.sleep(0.5)
 
 
-def wait_for_post_button_ready(driver, group_name: str, timeout: int):
+def wait_for_post_button_ready(driver, dialog, group_name: str, timeout: int):
     """
     Wait until the Post button is present and explicitly aria-disabled="false".
     Facebook keeps it disabled while a video is still uploading/processing,
@@ -315,7 +335,7 @@ def wait_for_post_button_ready(driver, group_name: str, timeout: int):
 
     while time.time() < deadline:
         try:
-            button = driver.find_element(By.XPATH, POST_BUTTON_XPATH)
+            button = dialog.find_element(By.XPATH, POST_BUTTON_XPATH)
             state = button.get_attribute("aria-disabled")
             if not logged_first_state:
                 logging.info(f"  Post button aria-disabled='{state}' in '{group_name}'")
@@ -350,10 +370,10 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         driver.get(group_url)
         time.sleep(2)
 
-        open_composer(driver, wait)
+        dialog = open_composer(driver, wait)
 
         try:
-            attach_media(driver, wait, campaign.media_path, campaign.is_video)
+            attach_media(driver, dialog, campaign.media_path, campaign.is_video)
         except TimeoutException:
             logging.warning(
                 f"Media upload never started in '{group_name}' "
@@ -362,12 +382,12 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
             )
             return "Error"
 
-        textbox = find_post_textbox(driver, wait)
+        textbox = find_post_textbox(dialog, wait)
         type_post_text(driver, textbox, campaign.text)
 
         processing_timeout = VIDEO_PROCESSING_TIMEOUT if campaign.is_video else PHOTO_PROCESSING_TIMEOUT
         try:
-            post_button = wait_for_post_button_ready(driver, group_name, processing_timeout)
+            post_button = wait_for_post_button_ready(driver, dialog, group_name, processing_timeout)
         except TimeoutException:
             logging.warning(
                 f"Media never finished processing in '{group_name}' "
