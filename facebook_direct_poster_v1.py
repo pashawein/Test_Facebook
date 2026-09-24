@@ -89,6 +89,19 @@ MEDIA_ATTACHED_XPATH = (
     " | .//img[contains(@src, 'blob:')]"
 )
 
+# Facebook can pre-populate the composer with a suggested photo from the
+# Page's own recent uploads *before* we've attached anything -- as if it
+# were already "attached". A human has to click its X to clear it before
+# uploading their own file; skipping that step is exactly why our own
+# "media attached" check above could pass instantly on a leftover
+# suggestion instead of the file we actually sent.
+REMOVE_ATTACHMENT_XPATH = (
+    ".//div[@aria-label='Remove photo' or @aria-label='Remove video' "
+    "or @aria-label='Удалить фото' or @aria-label='Удалить видео' "
+    "or @aria-label='Close' or @aria-label='Закрыть' "
+    "or @aria-label='Delete' or @aria-label='Удалить']"
+)
+
 POST_BUTTON_XPATH = (
     ".//div[@aria-label='Post' or @aria-label='Опубликовать']"
     "[@role='button']"
@@ -271,7 +284,31 @@ def _pick_media_file_input(file_inputs):
     return file_inputs[0]
 
 
+def clear_suggested_media(driver, dialog) -> None:
+    """
+    Facebook can pre-populate the composer with a suggested photo from the
+    Page's recent uploads before we touch anything. Click every close/remove
+    control in the dialog so our own upload starts from an empty slot --
+    matching what a human has to do manually (click the X first).
+    """
+    close_buttons = dialog.find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
+    for btn in close_buttons:
+        try:
+            js_click(driver, btn)
+        except (StaleElementReferenceException, ElementClickInterceptedException):
+            pass
+    if close_buttons:
+        time.sleep(1)
+
+
 def attach_media(driver, dialog, media_path: Path, is_video: bool) -> None:
+    clear_suggested_media(driver, dialog)
+
+    # Baseline count *after* clearing, so the wait below only succeeds once
+    # our own file actually attaches, not on a leftover suggestion that
+    # failed to clear or on a stale match.
+    baseline = len(dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH))
+
     attach_button = WebDriverWait(driver, WAIT_TIMEOUT).until(
         lambda _: dialog.find_element(By.XPATH, ATTACH_MEDIA_XPATH)
     )
@@ -287,7 +324,7 @@ def attach_media(driver, dialog, media_path: Path, is_video: bool) -> None:
     # not that it's fully processed -- see wait_for_post_button_ready for that.
     timeout = VIDEO_ATTACH_TIMEOUT if is_video else PHOTO_ATTACH_TIMEOUT
     WebDriverWait(driver, timeout).until(
-        lambda _: dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH) or False
+        lambda _: len(dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)) > baseline
     )
 
 
