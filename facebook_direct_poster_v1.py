@@ -57,8 +57,8 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
 SKIP_CATEGORY = "Error_NoPostField"
 
 WAIT_TIMEOUT = 10
-PHOTO_UPLOAD_WAIT = 4
-VIDEO_UPLOAD_WAIT = 10
+PHOTO_ATTACH_TIMEOUT = 20
+VIDEO_ATTACH_TIMEOUT = 120
 
 WRITE_SOMETHING_XPATH = (
     "//div[@role='button']"
@@ -67,6 +67,17 @@ WRITE_SOMETHING_XPATH = (
 )
 
 ATTACH_MEDIA_XPATH = "//div[@aria-label='Attach a photo or video']"
+
+# Facebook shows one of these once the file has actually finished
+# uploading/processing and is attached to the composer. Waiting for this
+# (rather than a fixed sleep) avoids clicking "Post" before a video is
+# ready, which silently posts the text alone with no attachment.
+MEDIA_ATTACHED_XPATH = (
+    "//div[@aria-label='Remove photo' or @aria-label='Remove video' "
+    "or @aria-label='Удалить фото' or @aria-label='Удалить видео']"
+    " | //div[@role='dialog']//video"
+    " | //div[@role='dialog']//img[contains(@src, 'blob:')]"
+)
 
 POST_BUTTON_XPATH = (
     "//div[@aria-label='Post' or @aria-label='Опубликовать']"
@@ -237,7 +248,7 @@ def open_composer(driver, wait: WebDriverWait) -> None:
     js_click(driver, write_something)
 
 
-def attach_media(driver, wait: WebDriverWait, media_path: Path) -> None:
+def attach_media(driver, wait: WebDriverWait, media_path: Path, is_video: bool) -> None:
     attach_button = wait.until(
         EC.element_to_be_clickable((By.XPATH, ATTACH_MEDIA_XPATH))
     )
@@ -247,6 +258,14 @@ def attach_media(driver, wait: WebDriverWait, media_path: Path) -> None:
         EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='file']"))
     )
     file_input.send_keys(str(media_path.resolve()))
+
+    timeout = VIDEO_ATTACH_TIMEOUT if is_video else PHOTO_ATTACH_TIMEOUT
+    WebDriverWait(driver, timeout).until(
+        EC.presence_of_element_located((By.XPATH, MEDIA_ATTACHED_XPATH))
+    )
+    # A short settle delay: the "attached" marker can appear slightly before
+    # the composer has finished registering the attachment internally.
+    time.sleep(2)
 
 
 def find_post_textbox(driver, wait: WebDriverWait):
@@ -293,9 +312,16 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         time.sleep(2)
 
         open_composer(driver, wait)
-        attach_media(driver, wait, campaign.media_path)
 
-        time.sleep(VIDEO_UPLOAD_WAIT if campaign.is_video else PHOTO_UPLOAD_WAIT)
+        try:
+            attach_media(driver, wait, campaign.media_path, campaign.is_video)
+        except TimeoutException:
+            logging.warning(
+                f"Media did not finish attaching in '{group_name}' "
+                f"(timed out after {VIDEO_ATTACH_TIMEOUT if campaign.is_video else PHOTO_ATTACH_TIMEOUT}s) "
+                "-- skipping to avoid posting without the attachment"
+            )
+            return "Error"
 
         textbox = find_post_textbox(driver, wait)
         type_post_text(driver, textbox, campaign.text)
