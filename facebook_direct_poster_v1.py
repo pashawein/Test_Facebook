@@ -58,7 +58,11 @@ SKIP_CATEGORY = "Error_NoPostField"
 
 WAIT_TIMEOUT = 10
 PHOTO_ATTACH_TIMEOUT = 20
-VIDEO_ATTACH_TIMEOUT = 120
+VIDEO_ATTACH_TIMEOUT = 60
+VIDEO_PROCESSING_TIMEOUT = 300
+PHOTO_PROCESSING_TIMEOUT = 30
+PROCESSING_POLL_INTERVAL = 5
+PROCESSING_LOG_EVERY = 15
 
 WRITE_SOMETHING_XPATH = (
     "//div[@role='button']"
@@ -259,13 +263,12 @@ def attach_media(driver, wait: WebDriverWait, media_path: Path, is_video: bool) 
     )
     file_input.send_keys(str(media_path.resolve()))
 
+    # This only confirms the upload *started* (a preview/thumbnail appeared),
+    # not that it's fully processed -- see wait_for_post_button_ready for that.
     timeout = VIDEO_ATTACH_TIMEOUT if is_video else PHOTO_ATTACH_TIMEOUT
     WebDriverWait(driver, timeout).until(
         EC.presence_of_element_located((By.XPATH, MEDIA_ATTACHED_XPATH))
     )
-    # A short settle delay: the "attached" marker can appear slightly before
-    # the composer has finished registering the attachment internally.
-    time.sleep(2)
 
 
 def find_post_textbox(driver, wait: WebDriverWait):
@@ -293,11 +296,36 @@ def type_post_text(driver, textbox, text: str) -> None:
     time.sleep(0.5)
 
 
-def click_post_button(driver, wait: WebDriverWait) -> None:
-    post_button = wait.until(
-        EC.element_to_be_clickable((By.XPATH, POST_BUTTON_XPATH))
-    )
-    js_click(driver, post_button)
+def wait_for_post_button_ready(driver, group_name: str, timeout: int):
+    """
+    Wait until the Post button is present and not aria-disabled. Facebook
+    keeps it disabled while a video is still uploading/processing, so this
+    is the real "ready to post" signal -- a fixed sleep can expire before
+    processing actually finishes, which posts the text with no video.
+    """
+    deadline = time.time() + timeout
+    last_log = 0.0
+
+    while time.time() < deadline:
+        try:
+            button = driver.find_element(By.XPATH, POST_BUTTON_XPATH)
+            if button.get_attribute("aria-disabled") in (None, "false"):
+                return button
+        except NoSuchElementException:
+            pass
+
+        elapsed = timeout - (deadline - time.time())
+        if elapsed - last_log >= PROCESSING_LOG_EVERY:
+            logging.info(f"  ...still waiting for media to finish processing in '{group_name}' ({int(elapsed)}s)")
+            last_log = elapsed
+
+        time.sleep(PROCESSING_POLL_INTERVAL)
+
+    raise TimeoutException(f"Post button never became enabled within {timeout}s")
+
+
+def click_post_button(driver, button) -> None:
+    js_click(driver, button)
 
 
 # --------------------------------------------------------------------------- #
@@ -317,7 +345,7 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
             attach_media(driver, wait, campaign.media_path, campaign.is_video)
         except TimeoutException:
             logging.warning(
-                f"Media did not finish attaching in '{group_name}' "
+                f"Media upload never started in '{group_name}' "
                 f"(timed out after {VIDEO_ATTACH_TIMEOUT if campaign.is_video else PHOTO_ATTACH_TIMEOUT}s) "
                 "-- skipping to avoid posting without the attachment"
             )
@@ -326,7 +354,17 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         textbox = find_post_textbox(driver, wait)
         type_post_text(driver, textbox, campaign.text)
 
-        click_post_button(driver, wait)
+        processing_timeout = VIDEO_PROCESSING_TIMEOUT if campaign.is_video else PHOTO_PROCESSING_TIMEOUT
+        try:
+            post_button = wait_for_post_button_ready(driver, group_name, processing_timeout)
+        except TimeoutException:
+            logging.warning(
+                f"Media never finished processing in '{group_name}' "
+                f"(timed out after {processing_timeout}s) -- skipping to avoid posting without the attachment"
+            )
+            return "Error"
+
+        click_post_button(driver, post_button)
         time.sleep(3)
 
         return "Posted"
