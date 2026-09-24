@@ -298,18 +298,29 @@ def type_post_text(driver, textbox, text: str) -> None:
 
 def wait_for_post_button_ready(driver, group_name: str, timeout: int):
     """
-    Wait until the Post button is present and not aria-disabled. Facebook
-    keeps it disabled while a video is still uploading/processing, so this
-    is the real "ready to post" signal -- a fixed sleep can expire before
-    processing actually finishes, which posts the text with no video.
+    Wait until the Post button is present and explicitly aria-disabled="false".
+    Facebook keeps it disabled while a video is still uploading/processing,
+    so this is the real "ready to post" signal -- a fixed sleep can expire
+    before processing actually finishes, which posts the text with no video.
+
+    Only an explicit "false" counts as ready. Treating a missing attribute
+    as ready too would make this pass instantly on the very first check if
+    Facebook doesn't set aria-disabled on this button at all, silently
+    defeating the whole wait (which is what a suspiciously fast ~14s per
+    group run looks like).
     """
     deadline = time.time() + timeout
     last_log = 0.0
+    logged_first_state = False
 
     while time.time() < deadline:
         try:
             button = driver.find_element(By.XPATH, POST_BUTTON_XPATH)
-            if button.get_attribute("aria-disabled") in (None, "false"):
+            state = button.get_attribute("aria-disabled")
+            if not logged_first_state:
+                logging.info(f"  Post button aria-disabled='{state}' in '{group_name}'")
+                logged_first_state = True
+            if state == "false":
                 return button
         except NoSuchElementException:
             pass
