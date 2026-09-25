@@ -318,7 +318,9 @@ def clear_suggested_media(driver) -> None:
 
 
 def attach_media(driver, media_path: Path, is_video: bool) -> None:
-    clear_suggested_media(driver)
+    # clear_suggested_media() is called separately by post_to_group, before
+    # this -- observed manual behavior is: type the text first, then close
+    # the suggested photo, then upload the real file.
 
     # Baseline count *after* clearing, so the wait below only succeeds once
     # our own file actually attaches, not on a leftover suggestion that
@@ -433,6 +435,13 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
 
         open_composer(driver, wait)
 
+        # Observed manual order: text first, then dismiss the suggested
+        # photo, then upload the real file -- not the other way around.
+        textbox = find_post_textbox(driver, wait)
+        type_post_text(driver, textbox, campaign.text)
+
+        clear_suggested_media(driver)
+
         try:
             attach_media(driver, campaign.media_path, campaign.is_video)
         except TimeoutException:
@@ -442,9 +451,6 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
                 "-- skipping to avoid posting without the attachment"
             )
             return "Error"
-
-        textbox = find_post_textbox(driver, wait)
-        type_post_text(driver, textbox, campaign.text)
 
         processing_timeout = VIDEO_PROCESSING_TIMEOUT if campaign.is_video else PHOTO_PROCESSING_TIMEOUT
         try:
