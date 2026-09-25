@@ -87,14 +87,18 @@ MEDIA_ATTACHED_XPATH = (
     " | .//img[contains(@src, 'blob:')]"
 )
 
-# Facebook can pre-populate the composer with a suggested photo from the
-# Page's own recent uploads *before* we've attached anything -- as if it
-# were already "attached". A human has to click its X to clear it before
-# uploading their own file; skipping that step is exactly why our own
-# "media attached" check above could pass instantly on a leftover
-# suggestion instead of the file we actually sent.
+# The post text contains a link (the tinyurl ticket link), and Facebook
+# auto-generates a link preview for it -- pulling thumbnail images from
+# the linked site itself, which is why unrelated pictures (from the
+# ticketing page, not our video) showed up attached. Confirmed via
+# DevTools: its close button is aria-label="Remove link preview from your
+# post". A human has to click that to clear it before uploading the real
+# file; skipping that step is exactly why our own "media attached" check
+# above could pass instantly on the link preview instead of the file we
+# actually sent.
 REMOVE_ATTACHMENT_XPATH = (
-    ".//div[@aria-label='Remove photo' or @aria-label='Remove video' "
+    ".//div[@aria-label='Remove link preview from your post' "
+    "or @aria-label='Remove photo' or @aria-label='Remove video' "
     "or @aria-label='Удалить фото' or @aria-label='Удалить видео' "
     "or @aria-label='Close' or @aria-label='Закрыть' "
     "or @aria-label='Delete' or @aria-label='Удалить']"
@@ -296,10 +300,12 @@ def _pick_media_file_input(file_inputs):
 
 def clear_suggested_media(driver) -> None:
     """
-    Facebook can pre-populate the composer with a suggested photo from the
-    Page's recent uploads before we touch anything. Click every close/remove
-    control in the dialog so our own upload starts from an empty slot --
-    matching what a human has to do manually (click the X first).
+    A link in the post text (e.g. a ticket URL) makes Facebook
+    auto-generate a link preview with images pulled from that site --
+    unrelated to our own media. Click every close/remove control in the
+    dialog (confirmed via DevTools: aria-label="Remove link preview from
+    your post") so our own upload starts from an empty slot, matching what
+    a human has to do manually (click its X first).
     """
     try:
         close_buttons = get_dialog(driver).find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
