@@ -264,16 +264,28 @@ def js_click(driver, element) -> None:
     driver.execute_script("arguments[0].click();", element)
 
 
-def open_composer(driver, wait: WebDriverWait):
+def get_dialog(driver):
+    """
+    Always fetch the "Create post" dialog fresh from the driver rather than
+    reusing a cached WebElement. Facebook appears to first render a
+    skeleton/loading version of the dialog and then swap in the fully
+    loaded one shortly after (and further re-renders can happen when we
+    dismiss the suggested-photo attachment) -- any reference held across
+    those swaps throws "stale element reference", which is what testing
+    kept hitting a few seconds into every group.
+    """
+    return driver.find_element(By.XPATH, DIALOG_XPATH)
+
+
+def open_composer(driver, wait: WebDriverWait) -> None:
     write_something = wait.until(
         EC.element_to_be_clickable((By.XPATH, WRITE_SOMETHING_XPATH))
     )
     js_click(driver, write_something)
-
-    # Scope everything that follows to this dialog element specifically --
-    # the page has other hidden <input type="file"> elements (cover photo,
-    # avatar, etc.) and a page-wide search can grab the wrong one.
-    return wait.until(EC.presence_of_element_located((By.XPATH, DIALOG_XPATH)))
+    wait.until(EC.presence_of_element_located((By.XPATH, DIALOG_XPATH)))
+    # Give the composer a moment to settle past its initial skeleton render
+    # before anything tries to grab elements inside it.
+    time.sleep(1.5)
 
 
 def _pick_media_file_input(file_inputs):
@@ -284,14 +296,18 @@ def _pick_media_file_input(file_inputs):
     return file_inputs[0]
 
 
-def clear_suggested_media(driver, dialog) -> None:
+def clear_suggested_media(driver) -> None:
     """
     Facebook can pre-populate the composer with a suggested photo from the
     Page's recent uploads before we touch anything. Click every close/remove
     control in the dialog so our own upload starts from an empty slot --
     matching what a human has to do manually (click the X first).
     """
-    close_buttons = dialog.find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
+    try:
+        close_buttons = get_dialog(driver).find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
+    except (NoSuchElementException, StaleElementReferenceException):
+        return
+
     for btn in close_buttons:
         try:
             js_click(driver, btn)
@@ -301,29 +317,22 @@ def clear_suggested_media(driver, dialog) -> None:
         time.sleep(1)
 
 
-def attach_media(driver, dialog, media_path: Path, is_video: bool):
-    clear_suggested_media(driver, dialog)
-
-    # Clearing the suggestion can make Facebook re-render the composer,
-    # which invalidates the dialog element we already had (that's the
-    # "stale element reference" error seen in testing). Re-locate it fresh
-    # before touching anything else.
-    dialog = WebDriverWait(driver, WAIT_TIMEOUT).until(
-        EC.presence_of_element_located((By.XPATH, DIALOG_XPATH))
-    )
+def attach_media(driver, media_path: Path, is_video: bool) -> None:
+    clear_suggested_media(driver)
 
     # Baseline count *after* clearing, so the wait below only succeeds once
     # our own file actually attaches, not on a leftover suggestion that
-    # failed to clear or on a stale match.
-    baseline = len(dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH))
+    # failed to clear or on a stale match. Re-fetch the dialog fresh right
+    # before every use -- see get_dialog().
+    baseline = len(get_dialog(driver).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH))
 
     attach_button = WebDriverWait(driver, WAIT_TIMEOUT).until(
-        lambda _: dialog.find_element(By.XPATH, ATTACH_MEDIA_XPATH)
+        lambda d: get_dialog(d).find_element(By.XPATH, ATTACH_MEDIA_XPATH)
     )
     js_click(driver, attach_button)
 
     file_inputs = WebDriverWait(driver, WAIT_TIMEOUT).until(
-        lambda _: dialog.find_elements(By.CSS_SELECTOR, "input[type='file']") or False
+        lambda d: get_dialog(d).find_elements(By.CSS_SELECTOR, "input[type='file']") or False
     )
     file_input = _pick_media_file_input(file_inputs)
     file_input.send_keys(str(media_path.resolve()))
@@ -332,19 +341,24 @@ def attach_media(driver, dialog, media_path: Path, is_video: bool):
     # not that it's fully processed -- see wait_for_post_button_ready for that.
     timeout = VIDEO_ATTACH_TIMEOUT if is_video else PHOTO_ATTACH_TIMEOUT
     WebDriverWait(driver, timeout).until(
-        lambda _: len(dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)) > baseline
+        lambda d: len(get_dialog(d).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)) > baseline
     )
 
-    return dialog
 
-
-def find_post_textbox(dialog, wait: WebDriverWait):
-    def _locate(_):
+def find_post_textbox(driver, wait: WebDriverWait):
+    def _locate(d):
+        try:
+            dialog = get_dialog(d)
+        except (NoSuchElementException, StaleElementReferenceException):
+            return False
         candidates = dialog.find_elements(
             By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox']"
         )
         for el in candidates:
-            placeholder = (el.get_attribute("aria-placeholder") or "")
+            try:
+                placeholder = (el.get_attribute("aria-placeholder") or "")
+            except StaleElementReferenceException:
+                continue
             if "comment" not in placeholder.lower() and "коммент" not in placeholder.lower():
                 return el
         return False
@@ -363,7 +377,7 @@ def type_post_text(driver, textbox, text: str) -> None:
     time.sleep(0.5)
 
 
-def wait_for_post_button_ready(driver, dialog, group_name: str, timeout: int):
+def wait_for_post_button_ready(driver, group_name: str, timeout: int):
     """
     Wait until the Post button is present and explicitly aria-disabled="false".
     Facebook keeps it disabled while a video is still uploading/processing,
@@ -382,14 +396,14 @@ def wait_for_post_button_ready(driver, dialog, group_name: str, timeout: int):
 
     while time.time() < deadline:
         try:
-            button = dialog.find_element(By.XPATH, POST_BUTTON_XPATH)
+            button = get_dialog(driver).find_element(By.XPATH, POST_BUTTON_XPATH)
             state = button.get_attribute("aria-disabled")
             if not logged_first_state:
                 logging.info(f"  Post button aria-disabled='{state}' in '{group_name}'")
                 logged_first_state = True
             if state == "false":
                 return button
-        except NoSuchElementException:
+        except (NoSuchElementException, StaleElementReferenceException):
             pass
 
         elapsed = timeout - (deadline - time.time())
@@ -417,10 +431,10 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         driver.get(group_url)
         time.sleep(2)
 
-        dialog = open_composer(driver, wait)
+        open_composer(driver, wait)
 
         try:
-            dialog = attach_media(driver, dialog, campaign.media_path, campaign.is_video)
+            attach_media(driver, campaign.media_path, campaign.is_video)
         except TimeoutException:
             logging.warning(
                 f"Media upload never started in '{group_name}' "
@@ -429,12 +443,12 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
             )
             return "Error"
 
-        textbox = find_post_textbox(dialog, wait)
+        textbox = find_post_textbox(driver, wait)
         type_post_text(driver, textbox, campaign.text)
 
         processing_timeout = VIDEO_PROCESSING_TIMEOUT if campaign.is_video else PHOTO_PROCESSING_TIMEOUT
         try:
-            post_button = wait_for_post_button_ready(driver, dialog, group_name, processing_timeout)
+            post_button = wait_for_post_button_ready(driver, group_name, processing_timeout)
         except TimeoutException:
             logging.warning(
                 f"Media never finished processing in '{group_name}' "
