@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sys
 import time
+import random
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +64,11 @@ VIDEO_ATTACH_TIMEOUT = 60
 # once the local upload preview renders it's clickable, so this only needs
 # to cover how long the button takes to appear/settle, not real processing.
 POST_BUTTON_TIMEOUT = 30
+
+# Pause between groups so posting doesn't look automated to Facebook (a
+# perfectly steady interval is itself a bot signal, hence the jitter).
+BETWEEN_GROUPS_DELAY_MIN = 30
+BETWEEN_GROUPS_DELAY_MAX = 45
 
 WRITE_SOMETHING_XPATH = (
     "//div[@role='button']"
@@ -518,7 +524,8 @@ def main() -> None:
     input("\nLog in to Facebook in the opened browser window, then press ENTER to start posting...")
 
     results = []
-    for _, row in targets.iterrows():
+    group_rows = list(targets.iterrows())
+    for i, (_, row) in enumerate(group_rows):
         group_name = row["Group Name"]
         group_url = row["URL"]
         logging.info(f"Posting to '{group_name}' ({group_url})")
@@ -526,6 +533,11 @@ def main() -> None:
         status = post_to_group(driver, campaign, group_name, group_url)
         results.append({"Group Name": group_name, "URL": group_url, "Status": status})
         logging.info(f"  -> {status}")
+
+        if i < len(group_rows) - 1:
+            delay = random.uniform(BETWEEN_GROUPS_DELAY_MIN, BETWEEN_GROUPS_DELAY_MAX)
+            logging.info(f"  Waiting {delay:.0f}s before the next group...")
+            time.sleep(delay)
 
     driver.quit()
 
