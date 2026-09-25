@@ -58,7 +58,13 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v"}
 
 SKIP_CATEGORY = "Error_NoPostField"
 
-WAIT_TIMEOUT = 10
+# Confirmed via screenshots during a large batch run: the composer dialog
+# opens fine and auto-focuses its textbox, but Facebook's UI responds much
+# slower than usual after a big burst of automated activity on the account
+# -- no block, no captcha, just genuinely slower rendering. 10s, which was
+# plenty for the first clean batch, wasn't enough here and caused a 100%
+# failure rate across an entire run. Raised to give the UI more room.
+WAIT_TIMEOUT = 25
 PHOTO_ATTACH_TIMEOUT = 20
 VIDEO_ATTACH_TIMEOUT = 60
 # Facebook doesn't gate the Post button on server-side video processing --
