@@ -46,6 +46,7 @@ from selenium.common.exceptions import (
 BASE_DIR = Path(__file__).resolve().parent
 CAMPAIGNS_DIR = BASE_DIR / "campaigns"
 REPORTS_DIR = BASE_DIR / "posting_reports"
+ERRORS_DIR = REPORTS_DIR / "errors"
 
 PAGES = {
     "1": ("Bard", BASE_DIR / "Page_Bard" / "groups.xlsx"),
@@ -113,6 +114,20 @@ REMOVE_ATTACHMENT_XPATH = (
 POST_BUTTON_XPATH = (
     ".//div[@aria-label='Post' or @aria-label='Опубликовать']"
     "[@role='button']"
+)
+
+# Some groups make posting conditional on answering membership questions
+# first -- a dialog Facebook can show instead of (or on top of) the normal
+# composer. There's no reliable single selector for it across groups, so
+# this matches on visible page text instead, same approach as the earlier
+# link-share script that established this convention.
+ADMIN_QUESTIONS_INDICATORS = (
+    "membership question",
+    "answer the following",
+    "do you live in",
+    "answer question",
+    "ответьте на вопрос",
+    "вопросы администратора",
 )
 
 
@@ -285,6 +300,25 @@ def get_dialog(driver):
     return driver.find_element(By.XPATH, DIALOG_XPATH)
 
 
+def check_for_admin_questions(driver) -> bool:
+    try:
+        page_text = driver.page_source.lower()
+    except (NoSuchElementException, StaleElementReferenceException):
+        return False
+    return any(indicator in page_text for indicator in ADMIN_QUESTIONS_INDICATORS)
+
+
+def save_error_screenshot(driver, group_name: str) -> None:
+    try:
+        ERRORS_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(c if c.isalnum() else "_" for c in group_name)[:40]
+        path = ERRORS_DIR / f"error_{safe_name}_{time.strftime('%H%M%S')}.png"
+        driver.save_screenshot(str(path))
+        logging.info(f"  Error screenshot: {path}")
+    except Exception as exc:  # noqa: BLE001 - screenshotting must never break the run
+        logging.debug(f"  Could not save error screenshot: {exc}")
+
+
 def open_composer(driver, wait: WebDriverWait) -> None:
     write_something = wait.until(
         EC.element_to_be_clickable((By.XPATH, WRITE_SOMETHING_XPATH))
@@ -431,13 +465,36 @@ def click_post_button(driver, button) -> None:
 # --------------------------------------------------------------------------- #
 
 def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -> str:
+    """
+    Never raises -- every failure is caught, logged, screenshotted, and
+    reported back as one of a fixed set of status strings so the run keeps
+    going to the next group. This mirrors the earlier link-share script's
+    convention: specific Error_* statuses the operator can later copy into
+    groups.xlsx's Category column to make future runs skip that group via
+    SKIP_CATEGORY, rather than one generic "Error" that hides the reason.
+    """
     wait = WebDriverWait(driver, WAIT_TIMEOUT)
 
     try:
         driver.get(group_url)
         time.sleep(2)
 
-        open_composer(driver, wait)
+        if check_for_admin_questions(driver):
+            logging.warning(f"Admin membership questions detected in '{group_name}'")
+            save_error_screenshot(driver, group_name)
+            return "Error_NeedsQuestions"
+
+        try:
+            open_composer(driver, wait)
+        except TimeoutException:
+            logging.warning(f"Post field never opened in '{group_name}' (group likely closed or restricted)")
+            save_error_screenshot(driver, group_name)
+            return "Error_NoPostField"
+
+        if check_for_admin_questions(driver):
+            logging.warning(f"Admin membership questions appeared after opening composer in '{group_name}'")
+            save_error_screenshot(driver, group_name)
+            return "Error_NeedsQuestions"
 
         # Observed manual order: text first, then dismiss the suggested
         # photo, then upload the real file -- not the other way around.
@@ -454,6 +511,7 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
                 f"(timed out after {VIDEO_ATTACH_TIMEOUT if campaign.is_video else PHOTO_ATTACH_TIMEOUT}s) "
                 "-- skipping to avoid posting without the attachment"
             )
+            save_error_screenshot(driver, group_name)
             return "Error"
 
         try:
@@ -463,7 +521,8 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
                 f"Post button never appeared in '{group_name}' "
                 f"(timed out after {POST_BUTTON_TIMEOUT}s) -- skipping"
             )
-            return "Error"
+            save_error_screenshot(driver, group_name)
+            return "Error_NoButton"
 
         click_post_button(driver, post_button)
         time.sleep(3)
@@ -472,12 +531,15 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
 
     except TimeoutException:
         logging.warning(f"Timeout waiting for an element in '{group_name}'")
+        save_error_screenshot(driver, group_name)
         return "Error"
     except (NoSuchElementException, ElementClickInterceptedException, StaleElementReferenceException) as exc:
         logging.warning(f"Selenium error in '{group_name}': {exc}")
+        save_error_screenshot(driver, group_name)
         return "Error"
     except Exception as exc:  # noqa: BLE001 - last-resort catch to keep the run going
         logging.warning(f"Unexpected error in '{group_name}': {exc}")
+        save_error_screenshot(driver, group_name)
         return "Error"
 
 
@@ -546,9 +608,20 @@ def main() -> None:
     report_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     posted = (report_df["Status"] == "Posted").sum()
-    errors = (report_df["Status"] == "Error").sum()
+    errors = report_df["Status"].str.startswith("Error").sum()
     logging.info(f"Done. Posted: {posted}, Errors: {errors}, Total: {len(report_df)}")
     logging.info(f"CSV report: {csv_path}")
+
+    # Break down errors by exact status so groups can be copied straight
+    # into groups.xlsx's Category column (matching SKIP_CATEGORY's
+    # convention of "Error_..." categories that future runs skip).
+    error_rows = report_df[report_df["Status"].str.startswith("Error")]
+    if not error_rows.empty:
+        logging.info("Groups that need attention (copy into groups.xlsx's Category column):")
+        for status, group in error_rows.groupby("Status"):
+            logging.info(f"  {status} ({len(group)}):")
+            for name in group["Group Name"]:
+                logging.info(f"    - {name}")
 
 
 if __name__ == "__main__":
