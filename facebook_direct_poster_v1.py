@@ -76,8 +76,6 @@ WRITE_SOMETHING_XPATH = (
 # dialog specifically, so we never grab the wrong one.
 DIALOG_XPATH = "//div[@role='dialog']"
 
-ATTACH_MEDIA_XPATH = ".//div[@aria-label='Attach a photo or video']"
-
 # Facebook shows one of these once the file has actually finished
 # uploading/processing and is attached to the composer. Waiting for this
 # (rather than a fixed sleep) avoids clicking "Post" before a video is
@@ -328,11 +326,18 @@ def attach_media(driver, media_path: Path, is_video: bool) -> None:
     # before every use -- see get_dialog().
     baseline = len(get_dialog(driver).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH))
 
-    attach_button = WebDriverWait(driver, WAIT_TIMEOUT).until(
-        lambda d: get_dialog(d).find_element(By.XPATH, ATTACH_MEDIA_XPATH)
-    )
-    js_click(driver, attach_button)
-
+    # Deliberately NOT clicking the "Attach a photo or video" button here.
+    # Facebook's own click handler on that button calls .click() on the
+    # underlying hidden <input type="file">, and a script-triggered click
+    # on a file input still opens the real native OS "Open File" dialog --
+    # a window outside the browser that Selenium can't see or control. It
+    # steals OS-level focus, which is exactly why every click after the
+    # upload (closing the suggestion, hitting Post) went nowhere even
+    # though the file itself did attach (via send_keys below, which sets
+    # the input's files directly through the WebDriver protocol and does
+    # NOT open that dialog). Instead, find the hidden input straight away
+    # -- Facebook renders it whether or not the button was clicked -- and
+    # send the file path to it directly.
     file_inputs = WebDriverWait(driver, WAIT_TIMEOUT).until(
         lambda d: get_dialog(d).find_elements(By.CSS_SELECTOR, "input[type='file']") or False
     )
