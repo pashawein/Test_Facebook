@@ -301,8 +301,16 @@ def clear_suggested_media(driver, dialog) -> None:
         time.sleep(1)
 
 
-def attach_media(driver, dialog, media_path: Path, is_video: bool) -> None:
+def attach_media(driver, dialog, media_path: Path, is_video: bool):
     clear_suggested_media(driver, dialog)
+
+    # Clearing the suggestion can make Facebook re-render the composer,
+    # which invalidates the dialog element we already had (that's the
+    # "stale element reference" error seen in testing). Re-locate it fresh
+    # before touching anything else.
+    dialog = WebDriverWait(driver, WAIT_TIMEOUT).until(
+        EC.presence_of_element_located((By.XPATH, DIALOG_XPATH))
+    )
 
     # Baseline count *after* clearing, so the wait below only succeeds once
     # our own file actually attaches, not on a leftover suggestion that
@@ -326,6 +334,8 @@ def attach_media(driver, dialog, media_path: Path, is_video: bool) -> None:
     WebDriverWait(driver, timeout).until(
         lambda _: len(dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)) > baseline
     )
+
+    return dialog
 
 
 def find_post_textbox(dialog, wait: WebDriverWait):
@@ -410,7 +420,7 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         dialog = open_composer(driver, wait)
 
         try:
-            attach_media(driver, dialog, campaign.media_path, campaign.is_video)
+            dialog = attach_media(driver, dialog, campaign.media_path, campaign.is_video)
         except TimeoutException:
             logging.warning(
                 f"Media upload never started in '{group_name}' "
