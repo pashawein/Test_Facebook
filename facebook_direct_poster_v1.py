@@ -59,10 +59,10 @@ SKIP_CATEGORY = "Error_NoPostField"
 WAIT_TIMEOUT = 10
 PHOTO_ATTACH_TIMEOUT = 20
 VIDEO_ATTACH_TIMEOUT = 60
-VIDEO_PROCESSING_TIMEOUT = 300
-PHOTO_PROCESSING_TIMEOUT = 30
-PROCESSING_POLL_INTERVAL = 5
-PROCESSING_LOG_EVERY = 15
+# Facebook doesn't gate the Post button on server-side video processing --
+# once the local upload preview renders it's clickable, so this only needs
+# to cover how long the button takes to appear/settle, not real processing.
+POST_BUTTON_TIMEOUT = 30
 
 WRITE_SOMETHING_XPATH = (
     "//div[@role='button']"
@@ -392,41 +392,28 @@ def type_post_text(driver, textbox, text: str) -> None:
 
 def wait_for_post_button_ready(driver, group_name: str, timeout: int):
     """
-    Wait until the Post button is present and explicitly aria-disabled="false".
-    Facebook keeps it disabled while a video is still uploading/processing,
-    so this is the real "ready to post" signal -- a fixed sleep can expire
-    before processing actually finishes, which posts the text with no video.
+    Wait for the Post button to be present and clickable.
 
-    Only an explicit "false" counts as ready. Treating a missing attribute
-    as ready too would make this pass instantly on the very first check if
-    Facebook doesn't set aria-disabled on this button at all, silently
-    defeating the whole wait (which is what a suspiciously fast ~14s per
-    group run looks like).
+    Confirmed live (aria-disabled='None' logged on every run, video or
+    photo) that Facebook does not set aria-disabled on this button at all
+    in this UI -- it stays absent whether or not the button is actually
+    usable, so waiting for it to become "false" never resolves and always
+    burns the full timeout. Facebook also doesn't require the video to
+    finish server-side processing before posting: once the local upload
+    preview renders (which attach_media already waits for), Post is
+    clickable immediately and processing continues after the post goes
+    through. So just wait for clickability, with a short settle delay
+    for the preview to finish rendering.
     """
-    deadline = time.time() + timeout
-    last_log = 0.0
-    logged_first_state = False
-
-    while time.time() < deadline:
-        try:
-            button = get_dialog(driver).find_element(By.XPATH, POST_BUTTON_XPATH)
-            state = button.get_attribute("aria-disabled")
-            if not logged_first_state:
-                logging.info(f"  Post button aria-disabled='{state}' in '{group_name}'")
-                logged_first_state = True
-            if state == "false":
-                return button
-        except (NoSuchElementException, StaleElementReferenceException):
-            pass
-
-        elapsed = timeout - (deadline - time.time())
-        if elapsed - last_log >= PROCESSING_LOG_EVERY:
-            logging.info(f"  ...still waiting for media to finish processing in '{group_name}' ({int(elapsed)}s)")
-            last_log = elapsed
-
-        time.sleep(PROCESSING_POLL_INTERVAL)
-
-    raise TimeoutException(f"Post button never became enabled within {timeout}s")
+    WebDriverWait(driver, timeout).until(
+        lambda d: get_dialog(d).find_elements(By.XPATH, POST_BUTTON_XPATH) or False
+    )
+    time.sleep(3)
+    # Re-fetch right before returning -- the settle delay above is enough
+    # time for a re-render to make an earlier reference stale.
+    button = get_dialog(driver).find_element(By.XPATH, POST_BUTTON_XPATH)
+    logging.info(f"  Post button ready in '{group_name}'")
+    return button
 
 
 def click_post_button(driver, button) -> None:
@@ -463,13 +450,12 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
             )
             return "Error"
 
-        processing_timeout = VIDEO_PROCESSING_TIMEOUT if campaign.is_video else PHOTO_PROCESSING_TIMEOUT
         try:
-            post_button = wait_for_post_button_ready(driver, group_name, processing_timeout)
+            post_button = wait_for_post_button_ready(driver, group_name, POST_BUTTON_TIMEOUT)
         except TimeoutException:
             logging.warning(
-                f"Media never finished processing in '{group_name}' "
-                f"(timed out after {processing_timeout}s) -- skipping to avoid posting without the attachment"
+                f"Post button never appeared in '{group_name}' "
+                f"(timed out after {POST_BUTTON_TIMEOUT}s) -- skipping"
             )
             return "Error"
 
