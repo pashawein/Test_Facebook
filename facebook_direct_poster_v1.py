@@ -47,7 +47,6 @@ BASE_DIR = Path(__file__).resolve().parent
 CAMPAIGNS_DIR = BASE_DIR / "campaigns"
 REPORTS_DIR = BASE_DIR / "posting_reports"
 ERRORS_DIR = REPORTS_DIR / "errors"
-CHROME_PROFILE_DIR = BASE_DIR / "ChromeProfile"
 
 PAGES = {
     "1": ("Bard", BASE_DIR / "Page_Bard" / "groups.xlsx"),
@@ -283,16 +282,16 @@ def choose_categories(df: pd.DataFrame) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 def build_driver() -> webdriver.Chrome:
-    # A persistent profile (not Selenium's default throwaway one) keeps
-    # Facebook's cookies/session and "remembered device" trust across runs.
-    # Without this, every run looks like a login from a brand-new device,
-    # which is exactly what triggers the "verify it's you" image challenge
-    # and the "new device" notification each time.
-    CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-
+    # NOTE: deliberately NOT using a persistent --user-data-dir here anymore.
+    # It was added to avoid the "new device" login challenge on every run,
+    # but the timing lines up too well with when composer interaction
+    # started degrading over the course of a day's runs (while v6, which has
+    # never used a persistent profile, stayed clean the whole time) -- a
+    # persistent profile may let some automation-suspicion signal accumulate
+    # and stick around across runs instead of resetting each time. Back to a
+    # fresh throwaway profile per run, matching v6 and the earlier clean runs.
     options = Options()
     options.add_argument("--start-maximized")
-    options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     # Masks navigator.webdriver and other automation fingerprints. Facebook
