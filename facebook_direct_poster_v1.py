@@ -439,7 +439,14 @@ def type_post_text(driver, textbox, text: str) -> None:
     # A clipboard round-trip (pyperclip + Ctrl+V) goes through Windows'
     # legacy ANSI codepage on some machines and silently mangles Cyrillic
     # into "?", even though the source text and log file are correct UTF-8.
-    js_click(driver, textbox)
+    #
+    # A real Selenium click here, not js_click's synthetic JS .click() --
+    # a contenteditable div needs an actual focus event for the browser to
+    # place a caret in it, which a JS-triggered click doesn't reliably
+    # produce (unlike a real click on a plain button). Without a real caret,
+    # the following send_keys can silently go nowhere even though the
+    # dialog looks completely normal on screen.
+    textbox.click()
     time.sleep(0.5)
     textbox.send_keys(text)
     time.sleep(0.5)
