@@ -295,7 +295,24 @@ def build_driver() -> webdriver.Chrome:
     options.add_argument(f"--user-data-dir={CHROME_PROFILE_DIR}")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    return webdriver.Chrome(options=options)
+    # Masks navigator.webdriver and other automation fingerprints. Facebook
+    # (and many sites) can detect a Selenium-controlled browser this way and
+    # quietly degrade interactivity for it while it still looks completely
+    # normal on screen -- consistent with the composer visually working fine
+    # but the script's own input events going nowhere, while manual typing
+    # in the exact same window works instantly. The older working script
+    # had this flag; this one was missing it.
+    options.add_argument("--disable-blink-features=AutomationControlled")
+
+    driver = webdriver.Chrome(options=options)
+    # Belt-and-suspenders: some Chrome versions still leak navigator.webdriver
+    # through the JS getter even with the flag above, so also patch it away
+    # at the CDP level before any page script runs.
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+    )
+    return driver
 
 
 def js_click(driver, element) -> None:
