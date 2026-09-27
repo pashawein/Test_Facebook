@@ -398,6 +398,45 @@ def clear_suggested_media(driver) -> None:
         time.sleep(1)
 
 
+def set_file_input_via_cdp(driver, file_input, media_path: Path) -> None:
+    """
+    Set a file input's value through the DevTools Protocol (DOM.setFileInputFiles)
+    instead of Selenium's built-in file-upload command (element.send_keys on an
+    <input type="file">).
+
+    Selenium's file upload is a well-known, very specific automation signature
+    (it sets the input's files directly through the WebDriver wire protocol,
+    something no real user interaction ever produces). Facebook may be keying
+    on exactly that to flag the session, which would explain why manual typing
+    in the same script-opened window keeps working right after an automated
+    run stalls, while a link-sharing script that never touches a file input
+    (v6) has run reliably for months at much higher volume. This uses the
+    lower-level CDP call some other automation tooling relies on instead, on
+    the chance it doesn't carry the same tell.
+
+    Mechanism: tag the specific input with a temporary unique attribute (there
+    can be several file inputs on the page -- see _pick_media_file_input),
+    find its CDP node via DOM.querySelector, hand DOM.setFileInputFiles that
+    node, then remove the marker attribute.
+    """
+    marker = "data-cdp-upload-target"
+    driver.execute_script(f"arguments[0].setAttribute('{marker}', '1')", file_input)
+    try:
+        doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
+        root_node_id = doc["root"]["nodeId"]
+        result = driver.execute_cdp_cmd(
+            "DOM.querySelector",
+            {"nodeId": root_node_id, "selector": f"[{marker}]"},
+        )
+        node_id = result["nodeId"]
+        driver.execute_cdp_cmd(
+            "DOM.setFileInputFiles",
+            {"files": [str(media_path.resolve())], "nodeId": node_id},
+        )
+    finally:
+        driver.execute_script(f"arguments[0].removeAttribute('{marker}')", file_input)
+
+
 def attach_media(driver, media_path: Path, is_video: bool) -> None:
     # clear_suggested_media() is called separately by post_to_group, before
     # this -- observed manual behavior is: type the text first, then close
@@ -425,7 +464,7 @@ def attach_media(driver, media_path: Path, is_video: bool) -> None:
         lambda d: get_dialog(d).find_elements(By.CSS_SELECTOR, "input[type='file']") or False
     )
     file_input = _pick_media_file_input(file_inputs)
-    file_input.send_keys(str(media_path.resolve()))
+    set_file_input_via_cdp(driver, file_input, media_path)
 
     # This only confirms the upload *started* (a preview/thumbnail appeared),
     # not that it's fully processed -- see wait_for_post_button_ready for that.
