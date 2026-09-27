@@ -292,6 +292,12 @@ def build_driver() -> webdriver.Chrome:
     # fresh throwaway profile per run, matching v6 and the earlier clean runs.
     options = Options()
     options.add_argument("--start-maximized")
+    # Without this, Facebook's own "www.facebook.com wants to Show
+    # notifications" permission prompt pops up as a native Chrome-level
+    # overlay (not part of the page DOM) -- present in v6 but missing here.
+    # A native popup sitting on top of the page is a plausible way for
+    # clicks/focus meant for the composer underneath to go nowhere.
+    options.add_argument("--disable-notifications")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     # Masks navigator.webdriver and other automation fingerprints. Facebook
