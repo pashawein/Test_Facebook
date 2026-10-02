@@ -74,8 +74,14 @@ POST_BUTTON_TIMEOUT = 30
 
 # Pause between groups so posting doesn't look automated to Facebook (a
 # perfectly steady interval is itself a bot signal, hence the jitter).
-BETWEEN_GROUPS_DELAY_MIN = 30
-BETWEEN_GROUPS_DELAY_MAX = 45
+#
+# Raised from 30-45s to ~60-75s on the theory that video posts queue up
+# server-side processing (Facebook explicitly says it'll notify you once
+# a video is ready), and submitting new video uploads faster than the
+# backend can drain that queue may be what degrades the composer for
+# later groups in a run -- not necessarily bot detection at all.
+BETWEEN_GROUPS_DELAY_MIN = 60
+BETWEEN_GROUPS_DELAY_MAX = 75
 
 WRITE_SOMETHING_XPATH = (
     "//div[@role='button']"
