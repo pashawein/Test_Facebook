@@ -83,6 +83,15 @@ POST_BUTTON_TIMEOUT = 30
 BETWEEN_GROUPS_DELAY_MIN = 60
 BETWEEN_GROUPS_DELAY_MAX = 75
 
+# Instead of failing a group outright on the first timeout and burning the
+# full between-groups delay before trying the next one, retry the failing
+# step in place a couple of times first -- cheap compared to a 60-75s wait,
+# and a stalled composer sometimes clears up within a few seconds on its own.
+ATTACH_MEDIA_ATTEMPTS = 3
+TEXT_TYPE_ATTEMPTS = 3
+POST_BUTTON_ATTEMPTS = 2
+RETRY_DELAY = 5
+
 WRITE_SOMETHING_XPATH = (
     "//div[@role='button']"
     "[contains(., 'Write something') or contains(., 'Написать что-нибудь') "
@@ -381,26 +390,32 @@ def _pick_media_file_input(file_inputs):
     return file_inputs[0]
 
 
-def clear_suggested_media(driver) -> None:
+def clear_new_link_preview(driver, baseline_count: int) -> None:
     """
-    A link in the post text (e.g. a ticket URL) makes Facebook
-    auto-generate a link preview with images pulled from that site --
-    unrelated to our own media. Click every close/remove control in the
-    dialog (confirmed via DevTools: aria-label="Remove link preview from
-    your post") so our own upload starts from an empty slot, matching what
-    a human has to do manually (click its X first).
+    Media is now attached *before* the text is typed (see post_to_group),
+    so the only surprise attachment left to handle is Facebook's own
+    link-preview auto-suggestion -- triggered by a URL inside the post
+    text, added only once typing happens. REMOVE_ATTACHMENT_XPATH matches
+    "Remove photo"/"Remove video" too, which is also our own real media's
+    own close button, so this must never blindly click every match the way
+    the old (text-first) version safely could. Instead, only act on
+    elements beyond baseline_count -- the count of remove-buttons captured
+    right after the real upload finished, before any text existed. A new
+    link preview renders appended at the end of the dialog's DOM, so
+    anything past that baseline is the extra one, never the real media.
     """
     try:
-        close_buttons = get_dialog(driver).find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
+        buttons = get_dialog(driver).find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
     except (NoSuchElementException, StaleElementReferenceException):
         return
 
-    for btn in close_buttons:
+    extra = buttons[baseline_count:]
+    for btn in extra:
         try:
             js_click(driver, btn)
         except (StaleElementReferenceException, ElementClickInterceptedException):
             pass
-    if close_buttons:
+    if extra:
         time.sleep(1)
 
 
@@ -444,14 +459,14 @@ def set_file_input_via_cdp(driver, file_input, media_path: Path) -> None:
 
 
 def attach_media(driver, media_path: Path, is_video: bool) -> None:
-    # clear_suggested_media() is called separately by post_to_group, before
-    # this -- observed manual behavior is: type the text first, then close
-    # the suggested photo, then upload the real file.
+    # Called first, before any text exists -- so no link-preview suggestion
+    # can exist yet either. clear_new_link_preview() is called separately
+    # by post_to_group, after the text is typed, to clean up the one
+    # surprise attachment that typing itself can introduce.
 
-    # Baseline count *after* clearing, so the wait below only succeeds once
-    # our own file actually attaches, not on a leftover suggestion that
-    # failed to clear or on a stale match. Re-fetch the dialog fresh right
-    # before every use -- see get_dialog().
+    # Baseline count before our own upload starts, so the wait below only
+    # succeeds once our own file actually attaches. Re-fetch the dialog
+    # fresh right before every use -- see get_dialog().
     baseline = len(get_dialog(driver).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH))
 
     # Deliberately NOT clicking the "Attach a photo or video" button here.
@@ -519,6 +534,32 @@ def type_post_text(driver, textbox, text: str) -> None:
     time.sleep(0.5)
 
 
+def type_post_text_with_verify(driver, wait: WebDriverWait, text: str, group_name: str, attempts: int):
+    """
+    This is exactly the symptom this whole investigation keeps circling
+    back to: send_keys silently producing no text in a composer that looks
+    completely normal (focused, blinking caret) while manual typing in the
+    same window works instantly. Re-fetch the textbox fresh and retry
+    typing a few times before giving up, instead of finding out only after
+    wasting the full attach/post-button timeouts downstream that nothing
+    ever actually landed.
+    """
+    textbox = find_post_textbox(driver, wait)
+    for attempt in range(1, attempts + 1):
+        type_post_text(driver, textbox, text)
+        entered = (textbox.get_attribute("innerText") or "").strip()
+        if entered:
+            return
+        logging.warning(
+            f"Post text came back empty after typing (attempt {attempt}/{attempts}) "
+            f"in '{group_name}' -- retrying"
+        )
+        if attempt < attempts:
+            time.sleep(RETRY_DELAY)
+            textbox = find_post_textbox(driver, wait)
+    raise TimeoutException(f"Post text never took in '{group_name}' after {attempts} attempts")
+
+
 def wait_for_post_button_ready(driver, group_name: str, timeout: int):
     """
     Wait for the Post button to be present and clickable.
@@ -547,6 +588,25 @@ def wait_for_post_button_ready(driver, group_name: str, timeout: int):
 
 def click_post_button(driver, button) -> None:
     js_click(driver, button)
+
+
+def _retry(fn, attempts: int, delay: float, label: str, group_name: str):
+    """
+    Run fn() up to `attempts` times, retrying only on TimeoutException (the
+    exception every stage below already raises on failure) with a short
+    pause in between. Returns fn()'s result on the first success; re-raises
+    the last TimeoutException once attempts are exhausted.
+    """
+    last_exc: Optional[TimeoutException] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except TimeoutException as exc:
+            last_exc = exc
+            logging.warning(f"{label} attempt {attempt}/{attempts} failed in '{group_name}': {exc}")
+            if attempt < attempts:
+                time.sleep(delay)
+    raise last_exc
 
 
 # --------------------------------------------------------------------------- #
@@ -585,30 +645,48 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
             save_error_screenshot(driver, group_name)
             return "Error_NeedsQuestions"
 
-        # Observed manual order: text first, then dismiss the suggested
-        # photo, then upload the real file -- not the other way around.
-        textbox = find_post_textbox(driver, wait)
-        type_post_text(driver, textbox, campaign.text)
-
-        clear_suggested_media(driver)
-
+        # Flipped from the original text-then-media order: attach the real
+        # media first, while the composer is freshest right after opening,
+        # then type the text. Each stage below also gets a few in-place
+        # retries before giving up on the group entirely -- far cheaper
+        # than immediately failing and burning the full 60-75s
+        # between-groups delay before trying the next one, on the chance a
+        # given attempt just caught a slow/stalled render rather than the
+        # group or account being genuinely stuck.
         try:
-            attach_media(driver, campaign.media_path, campaign.is_video)
+            _retry(
+                lambda: attach_media(driver, campaign.media_path, campaign.is_video),
+                ATTACH_MEDIA_ATTEMPTS, RETRY_DELAY, "Media attach", group_name,
+            )
         except TimeoutException:
             logging.warning(
                 f"Media upload never started in '{group_name}' "
-                f"(timed out after {VIDEO_ATTACH_TIMEOUT if campaign.is_video else PHOTO_ATTACH_TIMEOUT}s) "
+                f"(timed out after {ATTACH_MEDIA_ATTEMPTS} attempts) "
                 "-- skipping to avoid posting without the attachment"
             )
             save_error_screenshot(driver, group_name)
             return "Error"
 
+        remove_baseline = len(get_dialog(driver).find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH))
+
         try:
-            post_button = wait_for_post_button_ready(driver, group_name, POST_BUTTON_TIMEOUT)
+            type_post_text_with_verify(driver, wait, campaign.text, group_name, TEXT_TYPE_ATTEMPTS)
+        except TimeoutException:
+            logging.warning(f"Post text never took in '{group_name}' -- skipping")
+            save_error_screenshot(driver, group_name)
+            return "Error"
+
+        clear_new_link_preview(driver, remove_baseline)
+
+        try:
+            post_button = _retry(
+                lambda: wait_for_post_button_ready(driver, group_name, POST_BUTTON_TIMEOUT),
+                POST_BUTTON_ATTEMPTS, RETRY_DELAY, "Post button", group_name,
+            )
         except TimeoutException:
             logging.warning(
                 f"Post button never appeared in '{group_name}' "
-                f"(timed out after {POST_BUTTON_TIMEOUT}s) -- skipping"
+                f"(timed out after {POST_BUTTON_ATTEMPTS} attempts) -- skipping"
             )
             save_error_screenshot(driver, group_name)
             return "Error_NoButton"
