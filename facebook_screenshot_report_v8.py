@@ -576,7 +576,7 @@ def extract_group_name_from_text(full_text):
     """Название группы из текста записи ("posted in X")"""
     try:
         if 'posted in' in full_text:
-            return full_text.split('posted in')[-1].split('\n')[0].strip()[:60]
+            return full_text.split('posted in')[-1].split('\n')[0].strip().rstrip('.').strip()[:60]
         if 'By Pavel' in full_text:
             lines = [l.strip() for l in full_text.split('\n') if l.strip()]
             return lines[0][:60] if lines else ''
