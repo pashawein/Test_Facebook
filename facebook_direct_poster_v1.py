@@ -419,7 +419,7 @@ def clear_new_link_preview(driver, baseline_count: int) -> None:
         time.sleep(1)
 
 
-def set_file_input_via_cdp(driver, file_input, media_path: Path) -> None:
+def set_file_input_via_cdp(driver, file_input, media_path: Path) -> bool:
     """
     Set a file input's value through the DevTools Protocol (DOM.setFileInputFiles)
     instead of Selenium's built-in file-upload command (element.send_keys on an
@@ -439,6 +439,13 @@ def set_file_input_via_cdp(driver, file_input, media_path: Path) -> None:
     can be several file inputs on the page -- see _pick_media_file_input),
     find its CDP node via DOM.querySelector, hand DOM.setFileInputFiles that
     node, then remove the marker attribute.
+
+    Returns whether the input actually ended up holding the file -- CDP can
+    report success while Facebook's own JS never reacts to it (observed live:
+    the call raises nothing, but no thumbnail ever appears and the DOM's own
+    file list stays empty), so attach_media uses this to decide whether to
+    fall back to Selenium's native send_keys instead of waiting out the full
+    attach timeout on a method that silently never took.
     """
     marker = "data-cdp-upload-target"
     driver.execute_script(f"arguments[0].setAttribute('{marker}', '1')", file_input)
@@ -454,6 +461,7 @@ def set_file_input_via_cdp(driver, file_input, media_path: Path) -> None:
             "DOM.setFileInputFiles",
             {"files": [str(media_path.resolve())], "nodeId": node_id},
         )
+        return bool(driver.execute_script("return arguments[0].files.length;", file_input))
     finally:
         driver.execute_script(f"arguments[0].removeAttribute('{marker}')", file_input)
 
@@ -485,7 +493,14 @@ def attach_media(driver, media_path: Path, is_video: bool) -> None:
         lambda d: get_dialog(d).find_elements(By.CSS_SELECTOR, "input[type='file']") or False
     )
     file_input = _pick_media_file_input(file_inputs)
-    set_file_input_via_cdp(driver, file_input, media_path)
+    if not set_file_input_via_cdp(driver, file_input, media_path):
+        # CDP reported the input's own files list as still empty right after
+        # the call -- it never actually took, so there's nothing to wait for
+        # below. Fall back to Selenium's native send_keys immediately rather
+        # than burning the full attach timeout first; worth trying since CDP
+        # going silently inert like this is itself new behavior.
+        logging.warning("  CDP file upload did not take -- falling back to send_keys")
+        file_input.send_keys(str(media_path.resolve()))
 
     # This only confirms the upload *started* (a preview/thumbnail appeared),
     # not that it's fully processed -- see wait_for_post_button_ready for that.
