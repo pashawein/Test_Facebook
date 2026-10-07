@@ -489,9 +489,32 @@ def attach_media(driver, media_path: Path, is_video: bool) -> None:
     # NOT open that dialog). Instead, find the hidden input straight away
     # -- Facebook renders it whether or not the button was clicked -- and
     # send the file path to it directly.
-    file_inputs = WebDriverWait(driver, WAIT_TIMEOUT).until(
-        lambda d: get_dialog(d).find_elements(By.CSS_SELECTOR, "input[type='file']") or False
-    )
+    try:
+        file_inputs = WebDriverWait(driver, WAIT_TIMEOUT).until(
+            lambda d: get_dialog(d).find_elements(By.CSS_SELECTOR, "input[type='file']") or False
+        )
+    except TimeoutException:
+        # Diagnostic for the "dialog opens, nothing automated works, but
+        # manual interaction in the same window is fine" symptom -- log what
+        # the page actually looks like right now instead of a bare timeout,
+        # so the next failure shows whether get_dialog() is even grabbing
+        # the right element (e.g. a second/outer role='dialog' now exists
+        # and we're scoped to the wrong one) rather than guessing from logs.
+        try:
+            all_dialogs = driver.find_elements(By.XPATH, DIALOG_XPATH)
+            page_file_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            dialog_file_inputs = [
+                len(d.find_elements(By.CSS_SELECTOR, "input[type='file']")) for d in all_dialogs
+            ]
+            logging.warning(
+                f"  Diagnostic: {len(all_dialogs)} role=dialog element(s) on page, "
+                f"{len(page_file_inputs)} input[type=file] page-wide, "
+                f"file-input counts per dialog: {dialog_file_inputs}"
+            )
+        except (NoSuchElementException, StaleElementReferenceException) as exc:
+            logging.warning(f"  Diagnostic failed: {exc}")
+        raise
+
     file_input = _pick_media_file_input(file_inputs)
     if not set_file_input_via_cdp(driver, file_input, media_path):
         # CDP reported the input's own files list as still empty right after
