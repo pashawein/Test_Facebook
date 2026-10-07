@@ -485,65 +485,6 @@ def discard_stale_draft_media(driver, group_name: str) -> None:
     time.sleep(1)
 
 
-def set_file_input_via_cdp(driver, file_input, media_path: Path) -> bool:
-    """
-    Set a file input's value through the DevTools Protocol (DOM.setFileInputFiles)
-    instead of Selenium's built-in file-upload command (element.send_keys on an
-    <input type="file">).
-
-    Selenium's file upload is a well-known, very specific automation signature
-    (it sets the input's files directly through the WebDriver wire protocol,
-    something no real user interaction ever produces). Facebook may be keying
-    on exactly that to flag the session, which would explain why manual typing
-    in the same script-opened window keeps working right after an automated
-    run stalls, while a link-sharing script that never touches a file input
-    (v6) has run reliably for months at much higher volume. This uses the
-    lower-level CDP call some other automation tooling relies on instead, on
-    the chance it doesn't carry the same tell.
-
-    Mechanism: tag the specific input with a temporary unique attribute (there
-    can be several file inputs on the page -- see _pick_media_file_input),
-    find its CDP node via DOM.querySelector, hand DOM.setFileInputFiles that
-    node, then remove the marker attribute.
-
-    Returns whether the input actually ended up holding the file -- CDP can
-    report success while Facebook's own JS never reacts to it (observed live:
-    the call raises nothing, but no thumbnail ever appears and the DOM's own
-    file list stays empty), so attach_media uses this to decide whether to
-    fall back to Selenium's native send_keys instead of waiting out the full
-    attach timeout on a method that silently never took.
-
-    That check polls for up to ~1.5s rather than reading files.length once
-    immediately after the CDP call -- live symptom of checking too eagerly:
-    the check read 0 (CDP "hadn't taken yet"), attach_media fell back to
-    send_keys, and the file ended up attached *twice* -- once from each
-    mechanism landing, just with CDP's applying a beat later than an
-    instant check could see. Polling first avoids firing the fallback on a
-    race it would otherwise lose.
-    """
-    marker = "data-cdp-upload-target"
-    driver.execute_script(f"arguments[0].setAttribute('{marker}', '1')", file_input)
-    try:
-        doc = driver.execute_cdp_cmd("DOM.getDocument", {"depth": -1, "pierce": True})
-        root_node_id = doc["root"]["nodeId"]
-        result = driver.execute_cdp_cmd(
-            "DOM.querySelector",
-            {"nodeId": root_node_id, "selector": f"[{marker}]"},
-        )
-        node_id = result["nodeId"]
-        driver.execute_cdp_cmd(
-            "DOM.setFileInputFiles",
-            {"files": [str(media_path.resolve())], "nodeId": node_id},
-        )
-        for _ in range(15):
-            if driver.execute_script("return arguments[0].files.length;", file_input):
-                return True
-            time.sleep(0.1)
-        return False
-    finally:
-        driver.execute_script(f"arguments[0].removeAttribute('{marker}')", file_input)
-
-
 def attach_media(driver, media_path: Path, is_video: bool, baseline: int) -> None:
     # Called first, before any text exists -- so no link-preview suggestion
     # can exist yet either. clear_new_link_preview() is called separately
@@ -601,14 +542,13 @@ def attach_media(driver, media_path: Path, is_video: bool, baseline: int) -> Non
         raise
 
     file_input = _pick_media_file_input(file_inputs)
-    if not set_file_input_via_cdp(driver, file_input, media_path):
-        # CDP reported the input's own files list as still empty right after
-        # the call -- it never actually took, so there's nothing to wait for
-        # below. Fall back to Selenium's native send_keys immediately rather
-        # than burning the full attach timeout first; worth trying since CDP
-        # going silently inert like this is itself new behavior.
-        logging.warning("  CDP file upload did not take -- falling back to send_keys")
-        file_input.send_keys(str(media_path.resolve()))
+    # Back to plain Selenium send_keys -- the CDP DOM.setFileInputFiles path
+    # (tried on the theory that send_keys's automation signature was the
+    # cause of composer degradation, which never panned out) turned out to
+    # have its own effect land asynchronously. Checking too early read it as
+    # having failed, fired a send_keys fallback on top, and the file ended
+    # up attached twice -- a bug this single, synchronous call can't have.
+    file_input.send_keys(str(media_path.resolve()))
 
     # This only confirms the upload *started* (a preview/thumbnail appeared),
     # not that it's fully processed -- see wait_for_post_button_ready for that.
