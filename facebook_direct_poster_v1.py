@@ -348,8 +348,36 @@ def get_dialog(driver):
     dismiss the suggested-photo attachment) -- any reference held across
     those swaps throws "stale element reference", which is what testing
     kept hitting a few seconds into every group.
+
+    Facebook can also have more than one role='dialog' element mounted at
+    once -- confirmed live via diagnostic logging (3 dialogs present on a
+    group page, with file-input counts [0, 1, 0] across them). A bare
+    find_element always grabs the first one in document order, which here
+    was some other, unrelated dialog with no composer content at all --
+    the script was interacting with the wrong element the entire time,
+    which is exactly why the "Create post" dialog visibly opened on screen
+    (so open_composer's own presence check passed) while every subsequent
+    automated action inside it went nowhere, even though manually using
+    that same visible dialog always worked. Prefer whichever dialog
+    actually contains composer content (a textbox or a file input); fall
+    back to the last one if none do yet (e.g. right after opening, before
+    the composer has finished rendering its interior).
     """
-    return driver.find_element(By.XPATH, DIALOG_XPATH)
+    dialogs = driver.find_elements(By.XPATH, DIALOG_XPATH)
+    if not dialogs:
+        raise NoSuchElementException(f"No element matched {DIALOG_XPATH}")
+    if len(dialogs) == 1:
+        return dialogs[0]
+    for dialog in dialogs:
+        try:
+            if (
+                dialog.find_elements(By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox']")
+                or dialog.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            ):
+                return dialog
+        except StaleElementReferenceException:
+            continue
+    return dialogs[-1]
 
 
 def check_for_admin_questions(driver) -> bool:
