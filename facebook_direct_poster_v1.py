@@ -512,6 +512,14 @@ def set_file_input_via_cdp(driver, file_input, media_path: Path) -> bool:
     file list stays empty), so attach_media uses this to decide whether to
     fall back to Selenium's native send_keys instead of waiting out the full
     attach timeout on a method that silently never took.
+
+    That check polls for up to ~1.5s rather than reading files.length once
+    immediately after the CDP call -- live symptom of checking too eagerly:
+    the check read 0 (CDP "hadn't taken yet"), attach_media fell back to
+    send_keys, and the file ended up attached *twice* -- once from each
+    mechanism landing, just with CDP's applying a beat later than an
+    instant check could see. Polling first avoids firing the fallback on a
+    race it would otherwise lose.
     """
     marker = "data-cdp-upload-target"
     driver.execute_script(f"arguments[0].setAttribute('{marker}', '1')", file_input)
@@ -527,7 +535,11 @@ def set_file_input_via_cdp(driver, file_input, media_path: Path) -> bool:
             "DOM.setFileInputFiles",
             {"files": [str(media_path.resolve())], "nodeId": node_id},
         )
-        return bool(driver.execute_script("return arguments[0].files.length;", file_input))
+        for _ in range(15):
+            if driver.execute_script("return arguments[0].files.length;", file_input):
+                return True
+            time.sleep(0.1)
+        return False
     finally:
         driver.execute_script(f"arguments[0].removeAttribute('{marker}')", file_input)
 
@@ -604,6 +616,26 @@ def attach_media(driver, media_path: Path, is_video: bool, baseline: int) -> Non
     WebDriverWait(driver, timeout).until(
         lambda d: len(get_dialog(d).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)) > baseline
     )
+
+    # Safety net against the one file ending up attached twice (seen live:
+    # a CDP upload that actually landed a beat late, race-triggering the
+    # send_keys fallback on top of it) -- if more than one new attachment
+    # shows up from this single call, remove every extra one past the
+    # first so only the intended single copy survives.
+    dialog = get_dialog(driver)
+    attached_now = dialog.find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)
+    if len(attached_now) > baseline + 1:
+        logging.warning(
+            f"  {len(attached_now) - baseline} copies of the media attached from one "
+            "upload -- removing the extra copies"
+        )
+        remove_buttons = dialog.find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
+        for btn in remove_buttons[baseline + 1:]:
+            try:
+                js_click(driver, btn)
+            except (StaleElementReferenceException, ElementClickInterceptedException):
+                pass
+        time.sleep(1)
 
 
 def find_post_textbox(driver, wait: WebDriverWait):
