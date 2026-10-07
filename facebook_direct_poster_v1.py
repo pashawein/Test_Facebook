@@ -494,16 +494,23 @@ def set_file_input_via_cdp(driver, file_input, media_path: Path) -> bool:
         driver.execute_script(f"arguments[0].removeAttribute('{marker}')", file_input)
 
 
-def attach_media(driver, media_path: Path, is_video: bool) -> None:
+def attach_media(driver, media_path: Path, is_video: bool, baseline: int) -> None:
     # Called first, before any text exists -- so no link-preview suggestion
     # can exist yet either. clear_new_link_preview() is called separately
     # by post_to_group, after the text is typed, to clean up the one
     # surprise attachment that typing itself can introduce.
 
-    # Baseline count before our own upload starts, so the wait below only
-    # succeeds once our own file actually attaches. Re-fetch the dialog
-    # fresh right before every use -- see get_dialog().
-    baseline = len(get_dialog(driver).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH))
+    # baseline is captured once by the caller, before the first attempt --
+    # NOT re-measured on each retry. Facebook's composer accepts multiple
+    # photos/videos in one post, so a retry that blindly re-uploads after a
+    # first attempt that actually succeeded (just too slow to show its
+    # thumbnail before our wait timed out) would attach a *second* copy of
+    # the same file alongside the first instead of replacing it -- observed
+    # live as the same video appearing twice side by side in one post. If
+    # the count is already past the original baseline, the upload already
+    # landed; skip re-uploading entirely.
+    if len(get_dialog(driver).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)) > baseline:
+        return
 
     # Deliberately NOT clicking the "Attach a photo or video" button here.
     # Facebook's own click handler on that button calls .click() on the
@@ -719,9 +726,12 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         # between-groups delay before trying the next one, on the chance a
         # given attempt just caught a slow/stalled render rather than the
         # group or account being genuinely stuck.
+        # Captured once, before any attempt -- see attach_media for why this
+        # must not be re-measured on each retry.
+        media_baseline = len(get_dialog(driver).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH))
         try:
             _retry(
-                lambda: attach_media(driver, campaign.media_path, campaign.is_video),
+                lambda: attach_media(driver, campaign.media_path, campaign.is_video, media_baseline),
                 ATTACH_MEDIA_ATTEMPTS, RETRY_DELAY, "Media attach", group_name,
             )
         except TimeoutException:
