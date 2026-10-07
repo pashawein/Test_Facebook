@@ -447,6 +447,44 @@ def clear_new_link_preview(driver, baseline_count: int) -> None:
         time.sleep(1)
 
 
+def discard_stale_draft_media(driver, group_name: str) -> None:
+    """
+    Facebook can silently resume an old, never-finished "Create post" draft
+    when the composer reopens, pre-existing attached media and all. Live
+    symptom: a post went out with two *different* videos side by side, not
+    a duplicate of the same file -- the campaign only has one media file,
+    so the second had to be left over from an earlier abandoned attempt in
+    this same browser session, and our own upload added on top of it
+    instead of replacing it.
+
+    If the composer already shows attached media before attach_media has
+    done anything at all, that's always a stale draft (we haven't touched
+    the file input yet) -- clear every removable attachment so the real
+    baseline is zero going in.
+    """
+    try:
+        existing = get_dialog(driver).find_elements(By.XPATH, MEDIA_ATTACHED_XPATH)
+    except (NoSuchElementException, StaleElementReferenceException):
+        return
+    if not existing:
+        return
+
+    logging.warning(
+        f"  Composer opened with pre-existing media already attached in "
+        f"'{group_name}' -- discarding stale draft before uploading"
+    )
+    try:
+        remove_buttons = get_dialog(driver).find_elements(By.XPATH, REMOVE_ATTACHMENT_XPATH)
+    except (NoSuchElementException, StaleElementReferenceException):
+        return
+    for btn in remove_buttons:
+        try:
+            js_click(driver, btn)
+        except (StaleElementReferenceException, ElementClickInterceptedException):
+            pass
+    time.sleep(1)
+
+
 def set_file_input_via_cdp(driver, file_input, media_path: Path) -> bool:
     """
     Set a file input's value through the DevTools Protocol (DOM.setFileInputFiles)
@@ -717,6 +755,8 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
             logging.warning(f"Admin membership questions appeared after opening composer in '{group_name}'")
             save_error_screenshot(driver, group_name)
             return "Error_NeedsQuestions"
+
+        discard_stale_draft_media(driver, group_name)
 
         # Flipped from the original text-then-media order: attach the real
         # media first, while the composer is freshest right after opening,
