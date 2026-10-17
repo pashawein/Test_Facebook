@@ -546,7 +546,7 @@ function refresh() {
     .withFailureHandler(e => { setSource('Не удалось обновить: ' + (e && e.message || 'ошибка'), 'bad'); if (btn) btn.disabled = false; })
     .getData(KEY);
 }
-const KEY = new URLSearchParams(location.search).get('key') || '';
+const KEY = <?!= keyJson ?>;
 if (!TEAM) { document.getElementById('econ-panel').remove(); document.getElementById('m-fcnote').textContent = ''; }
 render(parseGrid(BOOT.grid, BOOT.cfg));
 setSource(stampText(BOOT.stamp), 'good');

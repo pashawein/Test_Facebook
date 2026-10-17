@@ -136,6 +136,7 @@ function doGet(e) {
   const t = HtmlService.createTemplateFromFile('Index');
   const js = o => JSON.stringify(o).replace(/</g, '\\u003c');
   t.gridJson = js(readGrid_());
+  t.keyJson = js(key);
   t.cfgJson = js(cfgFor_(mode));
   t.modeJson = js(mode);
   t.stampJson = js(stamp_());
