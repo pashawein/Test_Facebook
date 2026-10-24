@@ -600,20 +600,29 @@ def find_post_textbox(driver, wait: WebDriverWait):
 
 
 def type_post_text(driver, textbox, text: str) -> None:
-    # Typed natively via Selenium's key events rather than the OS clipboard.
-    # A clipboard round-trip (pyperclip + Ctrl+V) goes through Windows'
-    # legacy ANSI codepage on some machines and silently mangles Cyrillic
-    # into "?", even though the source text and log file are correct UTF-8.
-    #
     # A real Selenium click here, not js_click's synthetic JS .click() --
     # a contenteditable div needs an actual focus event for the browser to
     # place a caret in it, which a JS-triggered click doesn't reliably
     # produce (unlike a real click on a plain button). Without a real caret,
-    # the following send_keys can silently go nowhere even though the
-    # dialog looks completely normal on screen.
+    # text insertion can silently go nowhere even though the dialog looks
+    # completely normal on screen.
     textbox.click()
     time.sleep(0.5)
-    textbox.send_keys(text)
+
+    # Insert via the browser's own execCommand rather than Selenium's
+    # send_keys (which sends one W3C key event per character). ChromeDriver
+    # cannot send any character outside the Unicode Basic Multilingual
+    # Plane -- which covers almost every emoji -- and raises "ChromeDriver
+    # only supports characters in the BMP" the moment it hits one. Live
+    # symptom: a post text starting with an emoji attached its photo fine
+    # (unrelated code path) but never got any text, and the failure left
+    # the browser session broken enough that every subsequent group also
+    # failed ("target window already closed"). execCommand runs entirely
+    # inside the page itself -- no WebDriver key events involved -- so it
+    # has no such limitation and handles the full text, emoji included, in
+    # one call. Not a clipboard paste (that route mangled Cyrillic on some
+    # Windows machines via the OS codepage); this never leaves the browser.
+    driver.execute_script("document.execCommand('insertText', false, arguments[0]);", text)
     time.sleep(0.5)
 
 
