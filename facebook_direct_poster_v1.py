@@ -962,6 +962,23 @@ def main() -> None:
     print(f"Groups to post: {len(targets)}")
     if skipped_count:
         print(f"Groups skipped ({SKIP_CATEGORY}): {skipped_count}")
+
+    # Let the operator cap this run up front (e.g. only 30 of 65) instead
+    # of having to watch and interrupt it manually -- whatever's left over
+    # is simply never attempted, so it's picked up automatically by the
+    # resume prompt above next time this same campaign targets this same
+    # category selection.
+    limit_raw = input(f"How many groups to post this run? [Enter = all {len(targets)}]: ").strip()
+    if limit_raw:
+        try:
+            limit = int(limit_raw)
+        except ValueError:
+            print("Not a number -- using all.")
+            limit = len(targets)
+        if limit > 0 and limit < len(targets):
+            targets = targets.iloc[:limit]
+            print(f"Limiting this run to the first {limit} groups.")
+
     confirm = input("Proceed? [y/N]: ").strip().lower()
     if confirm != "y":
         print("Aborted.")
