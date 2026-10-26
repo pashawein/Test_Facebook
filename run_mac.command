@@ -5,6 +5,16 @@
 # `read` at the end keeps the window open after the script exits (success
 # or error) so the output doesn't disappear before it can be read.
 cd "$(dirname "$0")"
+
+# Pull the latest script/groups.xlsx from GitHub before every run, so a
+# double-click always uses whatever was last pushed without a manual
+# `git pull` first. If this fails (no internet, a local edit conflicting
+# with what's upstream) it's reported but not fatal -- the run continues
+# with whatever version is already on disk rather than refusing to start.
+echo "Checking for updates..."
+git pull || echo "Could not update (continuing with the current version)."
+echo
+
 # -d/-i/-s stop display, idle, and (on AC power) system sleep for as long
 # as this process runs -- the run that got cut off when the lid closed
 # died because macOS suspended the Chrome<->chromedriver connection
