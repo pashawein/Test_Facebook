@@ -19,8 +19,10 @@ Run:
 from __future__ import annotations
 
 import sys
+import json
 import time
 import random
+import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +49,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CAMPAIGNS_DIR = BASE_DIR / "campaigns"
 REPORTS_DIR = BASE_DIR / "posting_reports"
 ERRORS_DIR = REPORTS_DIR / "errors"
+PROGRESS_PATH = REPORTS_DIR / "progress.json"
 
 PAGES = {
     "1": ("Bard", BASE_DIR / "Page_Bard" / "groups.xlsx"),
@@ -253,6 +256,44 @@ def read_text_any_encoding(path: Path) -> str:
         except (UnicodeDecodeError, UnicodeError):
             continue
     return path.read_bytes().decode("utf-8", errors="replace").strip()
+
+
+# --------------------------------------------------------------------------- #
+# Progress tracking (resume a large category across separate runs)
+# --------------------------------------------------------------------------- #
+
+def campaign_fingerprint(campaign: Campaign) -> str:
+    """
+    A short, stable ID for "this exact post" -- its media file's bytes plus
+    its text. Used to key saved progress per (page, categories, campaign)
+    so posting the same campaign to the same category again picks up where
+    an earlier, interrupted or deliberately-limited run left off, while
+    switching to a different photo/video or text (a genuinely different
+    campaign) starts that category fresh rather than thinking it's already
+    been covered.
+    """
+    digest = hashlib.sha256()
+    digest.update(campaign.media_path.read_bytes())
+    digest.update(campaign.text.encode("utf-8"))
+    return digest.hexdigest()[:12]
+
+
+def progress_key(page_name: str, categories: list[str], campaign_hash: str) -> str:
+    return f"{page_name}::{','.join(sorted(categories))}::{campaign_hash}"
+
+
+def load_progress() -> dict:
+    if not PROGRESS_PATH.exists():
+        return {}
+    try:
+        return json.loads(PROGRESS_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_progress(progress: dict) -> None:
+    REPORTS_DIR.mkdir(exist_ok=True)
+    PROGRESS_PATH.write_text(json.dumps(progress, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------- #
@@ -884,6 +925,39 @@ def main() -> None:
         logging.error("No groups to post to after filtering.")
         sys.exit(1)
 
+    # Resume support: posting the same exact campaign (media + text) to the
+    # same page/category selection again picks up only the groups that
+    # weren't already attempted in an earlier run -- see campaign_fingerprint
+    # and progress_key. A different campaign, or a different category
+    # selection, gets no match here and simply runs the full list, same as
+    # before this existed.
+    campaign_hash = campaign_fingerprint(campaign)
+    key = progress_key(page_name, categories, campaign_hash)
+    progress = load_progress()
+    attempted_urls = set(progress.get(key, []))
+    if attempted_urls:
+        remaining = targets[~targets["URL"].isin(attempted_urls)]
+        if remaining.empty:
+            print(
+                f"\nAll {len(targets)} groups in this category were already "
+                "attempted with this exact post in an earlier run."
+            )
+            redo = input("Run them all again from scratch? [y/N]: ").strip().lower()
+            if redo != "y":
+                print("Nothing left to do.")
+                sys.exit(0)
+            attempted_urls = set()
+        else:
+            print(
+                f"\n{len(attempted_urls)} of {len(targets)} groups in this category "
+                "were already attempted with this exact post in an earlier run."
+            )
+            resume = input(f"Continue with the remaining {len(remaining)}? [Y/n]: ").strip().lower()
+            if resume in ("", "y"):
+                targets = remaining
+            else:
+                attempted_urls = set()
+
     print(f"\nPage: {page_name}")
     print(f"Groups to post: {len(targets)}")
     if skipped_count:
@@ -923,6 +997,15 @@ def main() -> None:
 
         results.append({"Group Name": group_name, "URL": group_url, "Status": status})
         logging.info(f"  -> {status}")
+
+        # Record this group as attempted right away (not just at the end of
+        # the run) -- a group that triggered RateLimitDetected above never
+        # reaches this line, so it and everything after it correctly stay
+        # unattempted for next time. Saved immediately so an interruption
+        # mid-run (closed lid, Ctrl+C) doesn't lose progress already made.
+        attempted_urls.add(group_url)
+        progress[key] = sorted(attempted_urls)
+        save_progress(progress)
 
         if i < len(group_rows) - 1:
             delay = random.uniform(BETWEEN_GROUPS_DELAY_MIN, BETWEEN_GROUPS_DELAY_MAX)
