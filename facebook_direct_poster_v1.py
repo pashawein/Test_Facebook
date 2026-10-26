@@ -151,6 +151,29 @@ ADMIN_QUESTIONS_INDICATORS = (
     "вопросы администратора",
 )
 
+# Facebook's own account-level throttle message, shown inline in the
+# composer right under a still-clickable Post button -- live-confirmed: it
+# shows up with the button still enabled, so without checking for this text
+# a run would click Post, Facebook would silently refuse to publish, and
+# the group would get logged as "Posted" when nothing actually went out.
+# This is account-wide, not specific to one group, so it's never just this
+# group's problem -- every subsequent group would hit the same wall.
+RATE_LIMIT_INDICATORS = (
+    "we limit how often you can post",
+    "limit how often you can post, comment",
+    "мы ограничиваем, как часто вы можете",
+)
+
+
+class RateLimitDetected(Exception):
+    """
+    Raised to abort the whole run immediately, not just the current group --
+    see RATE_LIMIT_INDICATORS. Deliberately NOT a subclass caught by
+    post_to_group's own exception handling, so it propagates all the way up
+    to main() uncaught by anything that would turn it into a per-group
+    "Error" and move on to the next group.
+    """
+
 
 # --------------------------------------------------------------------------- #
 # Logging
@@ -386,6 +409,14 @@ def check_for_admin_questions(driver) -> bool:
     except (NoSuchElementException, StaleElementReferenceException):
         return False
     return any(indicator in page_text for indicator in ADMIN_QUESTIONS_INDICATORS)
+
+
+def check_for_rate_limit(driver) -> bool:
+    try:
+        dialog_text = get_dialog(driver).text.lower()
+    except (NoSuchElementException, StaleElementReferenceException):
+        return False
+    return any(indicator in dialog_text for indicator in RATE_LIMIT_INDICATORS)
 
 
 def save_error_screenshot(driver, group_name: str) -> None:
@@ -791,6 +822,21 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         click_post_button(driver, post_button)
         time.sleep(3)
 
+        # A successful post closes the dialog -- get_dialog() then finds
+        # nothing and check_for_rate_limit() returns False via its own
+        # except clause, so this only trips when the dialog is still open
+        # with Facebook's account-level throttle message showing under a
+        # Post button that stayed clickable the whole time (live-confirmed:
+        # nothing else distinguishes a silently-refused post from a real
+        # one at this point). Raises past this function entirely -- see
+        # RateLimitDetected -- so the whole run stops here instead of
+        # logging "Posted" for a post that never actually went out, then
+        # ramming the same wall on every group after this one too.
+        if check_for_rate_limit(driver):
+            logging.error(f"Facebook rate limit hit while posting to '{group_name}' -- stopping the run")
+            save_error_screenshot(driver, group_name)
+            raise RateLimitDetected(group_name)
+
         return "Posted"
 
     except TimeoutException:
@@ -801,6 +847,8 @@ def post_to_group(driver, campaign: Campaign, group_name: str, group_url: str) -
         logging.warning(f"Selenium error in '{group_name}': {exc}")
         save_error_screenshot(driver, group_name)
         return "Error"
+    except RateLimitDetected:
+        raise  # let this one past -- see RateLimitDetected's docstring
     except Exception as exc:  # noqa: BLE001 - last-resort catch to keep the run going
         logging.warning(f"Unexpected error in '{group_name}': {exc}")
         save_error_screenshot(driver, group_name)
@@ -850,13 +898,29 @@ def main() -> None:
     input("\nLog in to Facebook in the opened browser window, then press ENTER to start posting...")
 
     results = []
+    rate_limited = False
     group_rows = list(targets.iterrows())
     for i, (_, row) in enumerate(group_rows):
         group_name = row["Group Name"]
         group_url = row["URL"]
         logging.info(f"Posting to '{group_name}' ({group_url})")
 
-        status = post_to_group(driver, campaign, group_name, group_url)
+        try:
+            status = post_to_group(driver, campaign, group_name, group_url)
+        except RateLimitDetected:
+            # Account-wide, not this group's problem -- every remaining
+            # group would hit the same wall, so stop the whole run here
+            # instead of burning through the rest logging false "Posted"es
+            # or repeated throttle hits. This group's own post never went
+            # out, so it's not recorded as Posted either.
+            logging.error(
+                "Stopping the run: Facebook's rate limit kicked in -- "
+                f"{len(group_rows) - i} group(s) never attempted. "
+                "Wait a few hours before trying again."
+            )
+            rate_limited = True
+            break
+
         results.append({"Group Name": group_name, "URL": group_url, "Status": status})
         logging.info(f"  -> {status}")
 
@@ -873,7 +937,8 @@ def main() -> None:
 
     posted = (report_df["Status"] == "Posted").sum()
     errors = report_df["Status"].str.startswith("Error").sum()
-    logging.info(f"Done. Posted: {posted}, Errors: {errors}, Total: {len(report_df)}")
+    status_word = "Stopped (rate limit)" if rate_limited else "Done"
+    logging.info(f"{status_word}. Posted: {posted}, Errors: {errors}, Total: {len(report_df)}")
     logging.info(f"CSV report: {csv_path}")
 
     # Break down errors by exact status so groups can be copied straight
