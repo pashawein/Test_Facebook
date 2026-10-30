@@ -1031,7 +1031,10 @@ def main() -> None:
 
     driver.quit()
 
-    report_df = pd.DataFrame(results)
+    # Explicit columns -- pd.DataFrame([]) has none at all, which crashes
+    # every .str/["Status"] access below. Happens for real: a rate limit
+    # hit on the very first group in a run leaves `results` empty.
+    report_df = pd.DataFrame(results, columns=["Group Name", "URL", "Status"])
     csv_path = REPORTS_DIR / f"report_{time.strftime('%Y%m%d_%H%M%S')}.csv"
     report_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
