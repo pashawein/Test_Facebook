@@ -691,10 +691,31 @@ def type_post_text(driver, textbox, text: str) -> None:
     # the browser session broken enough that every subsequent group also
     # failed ("target window already closed"). execCommand runs entirely
     # inside the page itself -- no WebDriver key events involved -- so it
-    # has no such limitation and handles the full text, emoji included, in
-    # one call. Not a clipboard paste (that route mangled Cyrillic on some
-    # Windows machines via the OS codepage); this never leaves the browser.
-    driver.execute_script("document.execCommand('insertText', false, arguments[0]);", text)
+    # has no such limitation and handles the full text, emoji included.
+    # Not a clipboard paste (that route mangled Cyrillic on some Windows
+    # machines via the OS codepage); this never leaves the browser.
+    #
+    # Line-by-line, not one insertText call on the whole string: a raw
+    # '\n' inside the text that execCommand('insertText') inserts is just
+    # a literal newline character, which Facebook's own editor (a
+    # React-controlled rich-text component) doesn't render as a line
+    # break -- live symptom: every line of the post ran together into one
+    # paragraph, link and all. send_keys used to get this right only
+    # because Selenium translates '\n' in a string into a real ENTER key
+    # press, which a rich-text editor does treat as starting a new
+    # paragraph. insertParagraph is execCommand's equivalent of that same
+    # Enter keypress, so doing it between each line reproduces the
+    # original line breaks while keeping emoji support.
+    driver.execute_script(
+        """
+        const lines = arguments[0].split('\\n');
+        lines.forEach((line, i) => {
+            if (line.length) document.execCommand('insertText', false, line);
+            if (i < lines.length - 1) document.execCommand('insertParagraph', false, null);
+        });
+        """,
+        text,
+    )
     time.sleep(0.5)
 
 
