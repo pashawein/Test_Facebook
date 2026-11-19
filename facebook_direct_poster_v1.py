@@ -681,41 +681,40 @@ def type_post_text(driver, textbox, text: str) -> None:
     textbox.click()
     time.sleep(0.5)
 
-    # Insert via the browser's own execCommand rather than Selenium's
-    # send_keys (which sends one W3C key event per character). ChromeDriver
-    # cannot send any character outside the Unicode Basic Multilingual
-    # Plane -- which covers almost every emoji -- and raises "ChromeDriver
-    # only supports characters in the BMP" the moment it hits one. Live
-    # symptom: a post text starting with an emoji attached its photo fine
-    # (unrelated code path) but never got any text, and the failure left
-    # the browser session broken enough that every subsequent group also
-    # failed ("target window already closed"). execCommand runs entirely
-    # inside the page itself -- no WebDriver key events involved -- so it
-    # has no such limitation and handles the full text, emoji included.
-    # Not a clipboard paste (that route mangled Cyrillic on some Windows
-    # machines via the OS codepage); this never leaves the browser.
+    # Real keystrokes (send_keys) for ordinary text -- this is what
+    # actually produces a working line break: Selenium translates a '\n'
+    # in the string into a real ENTER keypress, and Facebook's composer
+    # (a React-controlled rich-text editor) only starts a new paragraph on
+    # a real Enter, not on execCommand('insertParagraph') -- tried that as
+    # the fix for the issue below, confirmed live it still didn't produce
+    # any line breaks at all, whole post running together into one block,
+    # link and all.
     #
-    # Line-by-line, not one insertText call on the whole string: a raw
-    # '\n' inside the text that execCommand('insertText') inserts is just
-    # a literal newline character, which Facebook's own editor (a
-    # React-controlled rich-text component) doesn't render as a line
-    # break -- live symptom: every line of the post ran together into one
-    # paragraph, link and all. send_keys used to get this right only
-    # because Selenium translates '\n' in a string into a real ENTER key
-    # press, which a rich-text editor does treat as starting a new
-    # paragraph. insertParagraph is execCommand's equivalent of that same
-    # Enter keypress, so doing it between each line reproduces the
-    # original line breaks while keeping emoji support.
-    driver.execute_script(
-        """
-        const lines = arguments[0].split('\\n');
-        lines.forEach((line, i) => {
-            if (line.length) document.execCommand('insertText', false, line);
-            if (i < lines.length - 1) document.execCommand('insertParagraph', false, null);
-        });
-        """,
-        text,
-    )
+    # The one thing send_keys can't do is emoji: ChromeDriver cannot send
+    # any character outside the Unicode Basic Multilingual Plane -- which
+    # covers almost every emoji -- and raises "ChromeDriver only supports
+    # characters in the BMP" the moment it hits one, which previously broke
+    # the whole browser session for the rest of the run. So only those
+    # specific characters get routed around send_keys, one at a time, via
+    # execCommand('insertText') (runs entirely inside the page, no WebDriver
+    # key event involved, so the BMP limit doesn't apply) -- everything
+    # else goes through send_keys exactly as before, preserving real Enter
+    # behavior for every line break. Not a clipboard paste either (that
+    # route mangled Cyrillic on some Windows machines via the OS codepage).
+    buffer = []
+
+    def flush():
+        if buffer:
+            textbox.send_keys("".join(buffer))
+            buffer.clear()
+
+    for ch in text:
+        if ord(ch) > 0xFFFF:
+            flush()
+            driver.execute_script("document.execCommand('insertText', false, arguments[0]);", ch)
+        else:
+            buffer.append(ch)
+    flush()
     time.sleep(0.5)
 
 
